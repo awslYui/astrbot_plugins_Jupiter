@@ -1,0 +1,13 @@
+{
+  "rooms": {"type": "list", "description": "直播间与主播 UID", "hint": "每项填 房间号:主播UID，例如 123456:987654321。", "default": []},
+  "extra_uids": {"type": "list", "description": "额外关注的 B 站 UID", "hint": "这些 UID 在所有已配置房间中的弹幕也会推送。", "default": []},
+  "target_umo": {"type": "string", "description": "推送会话", "hint": "在目标群执行 /jupiter_bind 可自动填写。", "default": ""},
+  "notify_stream": {"type": "bool", "description": "推送开播和下播事件", "default": false},
+  "notify_superchat": {"type": "bool", "description": "推送醒目留言", "default": false},
+  "gift_min_yuan": {"type": "float", "description": "付费礼物最低金额（元）", "hint": "填 0 关闭礼物推送。按单条事件的总价判断。", "default": 0.0},
+  "bridge_url": {"type": "string", "description": "已有 Event Bridge 地址（可选）", "hint": "留空时直连 B 站。填写后通过已有 Bridge 读取事件，rooms 中应填正式房间号。", "default": ""},
+  "bridge_token": {"type": "string", "description": "Event Bridge Token（可选）", "secret": true, "default": ""},
+  "bili_sessdata": {"type": "string", "description": "自己 B 站账号的 SESSDATA（可选）", "hint": "直连 B 站时，如果匿名弹幕缺少 UID 或上游要求登录，可填自己的 Cookies 字段值。", "secret": true, "default": ""},
+  "bili_dedeuserid": {"type": "string", "description": "自己的 B 站账号 UID（可选）", "hint": "与 SESSDATA 属于同一个账号，不是监测主播的 UID。", "default": ""},
+  "bili_buvid3": {"type": "string", "description": "自己 B 站账号的 buvid3（可选）", "secret": true, "default": ""}
+}

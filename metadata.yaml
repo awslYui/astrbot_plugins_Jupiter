@@ -1,0 +1,7 @@
+name: astrbot_plugin_jupiter
+display_name: Jupiter 直播间通知
+desc: 监听 B 站直播间弹幕与互动事件，向绑定的 AstrBot 会话主动推送。
+version: v0.1.0
+author: Local
+astrbot_version: ">=4.18.0"
+repo: https://github.com/awslYui/astrbot_plugins_Jupiter
