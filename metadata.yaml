@@ -1,7 +1,7 @@
 name: astrbot_plugin_jupiter
 display_name: Jupiter 直播与动态通知
 desc: 整合直播间弹幕、B 站动态、开播提醒及 RSS 订阅，向绑定的 AstrBot 会话主动推送。
-version: v0.3.0
+version: v0.3.1
 author: Local
 astrbot_version: ">=4.26.0"
 repo: https://github.com/awslYui/astrbot_plugins_Jupiter

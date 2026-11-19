@@ -6,10 +6,11 @@ from weakref import WeakSet
 import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from bilibili_api import Credential, live
+from bilibili_api import Credential
 from yarl import URL
 
 from .lifecycle import consume_task, finish_tasks
+from .bili_transport import create_danmaku
 from .migration import import_legacy_eop
 from .subscriptions import SubscriptionMonitor
 
@@ -112,6 +113,7 @@ class MonitorRuntime:
         if bridge:
             self.tasks.add(asyncio.create_task(self.watch_bridge(bridge)))
         else:
+            logger.info('[Jupiter] 实时弹幕使用插件独立的 aiohttp WebSocket 连接')
             self.tasks.update(asyncio.create_task(self.watch_room(room)) for room in self.rooms)
 
     async def terminate(self):
@@ -162,10 +164,13 @@ class MonitorRuntime:
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
                     task.add_done_callback(consume_task)
+        owned = getattr(client, '_jupiter_transport', None)
         transport = getattr(client, '_LiveDanmaku__client', None)
         socket = getattr(client, '_LiveDanmaku__ws', None)
-        if transport is not None and socket is not None:
-            task = asyncio.create_task(transport.ws_close(socket))
+        if owned is not None or (transport is not None and socket is not None):
+            # Only the Jupiter-owned aiohttp session is closed. Never close a
+            # process-wide SDK session used by other Bilibili plugins.
+            task = asyncio.create_task(owned.close() if owned is not None else transport.ws_close(socket))
             self.cleanup_tasks.add(task)
             task.add_done_callback(self.cleanup_tasks.discard)
             task.add_done_callback(consume_task)
@@ -190,18 +195,20 @@ class MonitorRuntime:
 
         delay = 5
         while not self.stopping:
-            client = live.LiveDanmaku(room, credential=credential, max_retry=0, retry_after=3)
-            self.clients[room] = client
-            client.add_event_listener('ALL', notice)
-            self.status[room] = '连接中'
+            client = None
             try:
+                client = create_danmaku(room, credential=credential, max_retry=0, retry_after=3)
+                self.clients[room] = client
+                client.add_event_listener('ALL', notice)
+                self.status[room] = '连接中'
                 await client.connect()
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 logger.warning('[Jupiter] 房间 %s 连接失败 (%s)', room, type(error).__name__)
             finally:
-                self.stop_client(client)
+                if client is not None:
+                    self.stop_client(client)
             if self.stopping:
                 return
             if self.status[room] == '已连接':

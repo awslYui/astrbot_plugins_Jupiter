@@ -84,10 +84,11 @@ def load_plugin():
         lifecycle = sys.modules['jupiter_fixture.lifecycle']
         runtime = sys.modules['jupiter_fixture.runtime']
         webui = sys.modules['jupiter_fixture.webui']
-    return plugin, subscriptions, lifecycle, tools, runtime, webui
+        transport = sys.modules['jupiter_fixture.bili_transport']
+    return plugin, subscriptions, lifecycle, tools, runtime, webui, transport
 
 
-PLUGIN, SUBSCRIPTIONS, LIFECYCLE, TOOLS, RUNTIME, WEBUI = load_plugin()
+PLUGIN, SUBSCRIPTIONS, LIFECYCLE, TOOLS, RUNTIME, WEBUI, TRANSPORT = load_plugin()
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
@@ -354,7 +355,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             config = Config(self.config, rooms=['123:45'], bili_uids=['45'])
             plugin = RUNTIME.MonitorRuntime(self.context, config)
             plugin.subscriptions.poll = self.pause_polling
-            with patch.object(RUNTIME.live, 'LiveDanmaku', Client):
+            with patch.object(RUNTIME, 'create_danmaku', Client):
                 await plugin.initialize()
                 await asyncio.sleep(0)
                 client = plugin.clients[123]

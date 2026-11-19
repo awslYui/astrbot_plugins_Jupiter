@@ -12,7 +12,7 @@ from .runtime import room_config
 from .subscriptions import sources_from_config
 
 
-VERSION = '0.3.0'
+VERSION = '0.3.1'
 PLUGIN_NAME = 'astrbot_plugin_jupiter'
 SECRET_FIELDS = ('bridge_token', 'bili_sessdata', 'bili_buvid3')
 SCHEMA = json.loads((Path(__file__).parent / '_conf_schema.json').read_text(encoding='utf-8'))

@@ -1,6 +1,6 @@
 # Jupiter 直播与动态通知
 
-v0.3.0 提供 AstrBot 内置管理面板，并整合 Jupiter 和 EoP 的通知功能。它监听 B 站直播间弹幕，并轮询 B 站动态、开播状态与 RSS、Atom、JSON 订阅源，统一向绑定的 AstrBot 会话推送通知。功能设计参考 [LAPLACE Jupiter](https://github.com/laplace-live/jupiter) 和 [LAPLACE EoP](https://laplace.live/eye-of-providence)。
+v0.3.1 修订弹幕连接的客户端隔离，保留 AstrBot 内置管理面板和 Jupiter、EoP 的全部通知功能。它监听 B 站直播间弹幕，并轮询 B 站动态、开播状态与 RSS、Atom、JSON 订阅源，统一向绑定的 AstrBot 会话推送通知。功能设计参考 [LAPLACE Jupiter](https://github.com/laplace-live/jupiter) 和 [LAPLACE EoP](https://laplace.live/eye-of-providence)。
 
 ## 安装与升级
 
@@ -9,6 +9,16 @@ v0.3.0 提供 AstrBot 内置管理面板，并整合 Jupiter 和 EoP 的通知�
 3. 打开下方的管理面板，填写需要的房间或订阅来源，点击“保存并应用”。用 AstrBot 管理员账号在目标 QQ 群发 `/jupiter_bind`，再发 `/jupiter_test`，确认实际收到测试消息。若使用 AstrBot 通用插件配置表单，保存后需重载插件。
 
 若旧版本已经卡在卸载阶段，先停止 AstrBot，在停止状态下替换插件文件，再启动。旧配置通常在 `data/config/`，订阅记录在 `data/plugin_data/`。[AstrBot OneBot v11](https://docs.astrbot.app/platform/aiocqhttp.html)
+
+若安装后容器反复重启，也应先停止容器，在挂载的 `data/plugins/astrbot_plugin_jupiter/` 内替换为当前版本的文件，再启动。保留 `data/config/` 和 `data/plugin_data/`。无法直接替换时，将插件目录移到 `data/plugins/` 之外，启动 AstrBot 后再安装当前版本。
+
+## v0.3.1 连接兼容修订
+
+实时弹幕继续使用同版本 B 站 SDK 的认证、协议、心跳和事件处理，仅将 WebSocket 固定为 Jupiter 独立持有的 aiohttp 客户端。SDK 默认会优先选择环境中可用的 `curl_cffi`；17.4.2 的 curl 适配器在线程中直接读取异步 WebSocket 的底层句柄，该用法与新版 curl_cffi 的后台接收不兼容。上游文档明确要求异步连接使用公开接收接口，避免底层句柄竞争。[curl_cffi WebSocket 文档](https://github.com/lexiforest/curl_cffi/blob/main/docs/websockets.rst)
+
+此修订不更改插件功能、配置格式、自动监听行为或其他插件的 SDK 全局客户端选择。关闭和重连时只清理 Jupiter 自己的 WebSocket、会话及后台任务，继续保持总计 3 秒的关闭等待上限。
+
+安装成功后无 Python 退出堆栈、直接再次启动的日志，只能证明进程曾中断，不能单独确定段错误、内存不足或外部重启。此版本排除了上述已确认的不安全接收路径；若仍有异常，需要结合 Docker 的退出码、OOM 状态及宿主机记录核实，不应仅凭知识库等非致命报错归因。
 
 ## 管理面板
 
