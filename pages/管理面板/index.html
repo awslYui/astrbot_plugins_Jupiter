@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jupiter 管理面板</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <div class="page-title"><h1>Jupiter</h1><span>直播与动态通知</span></div>
+      <div class="header-actions">
+        <button type="button" id="refresh">刷新状态</button>
+        <button type="submit" form="settings" class="primary" id="save">保存并应用</button>
+      </div>
+    </header>
+
+    <div class="status-strip" aria-live="polite">
+      <span><i class="dot" id="running-dot"></i><strong id="running-label">正在连接管理面板</strong></span>
+      <span id="binding-label">正在读取推送会话</span>
+      <span>待发送 <strong id="pending-count">—</strong></span>
+    </div>
+    <div id="message" class="message" role="status" hidden></div>
+    <div id="runtime-warnings" class="message" role="status" hidden></div>
+    <div id="conflict" class="message" hidden>设置已在其他会话中改变。<button type="button" id="reload-settings">重新载入设置</button></div>
+
+    <nav class="tabs" role="tablist" aria-label="管理项目">
+      <button type="button" role="tab" id="tab-sources" aria-selected="true" aria-controls="sources" tabindex="0">监听与订阅</button>
+      <button type="button" role="tab" id="tab-notifications" aria-selected="false" aria-controls="notifications" tabindex="-1">通知设置</button>
+      <button type="button" role="tab" id="tab-connection" aria-selected="false" aria-controls="connection" tabindex="-1">连接与凭证</button>
+    </nav>
+
+    <form id="settings" novalidate>
+      <section id="sources" role="tabpanel" aria-labelledby="tab-sources">
+        <div class="source-grid">
+          <section class="panel">
+            <div class="panel-heading"><h2>直播间弹幕</h2><button type="button" class="outline" id="add-room">添加直播间</button></div>
+            <div class="room-table-wrap">
+              <table class="room-table">
+                <thead><tr><th>房间号</th><th>主播 UID</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody id="room-rows"></tbody>
+              </table>
+              <p id="rooms-empty" class="empty" hidden>尚未添加直播间</p>
+            </div>
+            <div class="extra-users">
+              <label for="extra_uids">额外关注 UID</label>
+              <div><input id="extra_uids" placeholder="多个 UID 用逗号分隔" autocomplete="off"><p class="hint">转发这些用户在已监听房间中的弹幕。</p></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading"><h2>动态与开播</h2></div>
+            <div class="labelled-row"><label for="bili_uids">动态账号 UID</label><div><textarea id="bili_uids" rows="3" placeholder="每行一个 B 站 UID"></textarea><p class="hint">订阅账号发布的新动态。</p></div></div>
+            <div class="labelled-row"><label for="bili_rooms">开播提醒房间</label><div><textarea id="bili_rooms" rows="3" placeholder="每行一个直播间号"></textarea><p class="hint">定期检查开播状态。</p></div></div>
+            <div id="source-status" class="source-status" aria-live="polite"></div>
+          </section>
+        </div>
+
+        <section class="panel feeds-panel">
+          <div class="panel-heading"><h2>订阅源</h2><button type="button" class="outline" id="add-feed">添加订阅源</button></div>
+          <div id="feed-rows"></div>
+          <p id="feeds-empty" class="empty" hidden>添加 RSS、Atom 或 JSON 订阅地址。</p>
+        </section>
+      </section>
+
+      <section id="notifications" role="tabpanel" aria-labelledby="tab-notifications" hidden>
+        <section class="panel settings-panel">
+          <div class="panel-heading"><h2>推送会话</h2></div>
+          <label for="target_umo">目标会话 UMO</label>
+          <div class="input-action"><input id="target_umo" placeholder="平台 ID:GroupMessage:群号" autocomplete="off"><button type="button" id="test-send">测试已保存目标</button></div>
+          <p class="hint">在目标 QQ 群发送 /sid 获取 UMO，或发送 /jupiter_bind 直接绑定。</p>
+          <div class="divider"></div>
+          <div class="field-grid">
+            <div><label for="interval_seconds">轮询间隔（秒）</label><input id="interval_seconds" type="number" min="60" step="1"><p class="hint">每轮订阅检查完成后等待，至少 60 秒。</p></div>
+            <div><label for="gift_min_yuan">礼物最低金额（元）</label><input id="gift_min_yuan" type="number" min="0" step="0.01"><p class="hint">填 0 关闭付费礼物提醒。</p></div>
+          </div>
+          <div class="toggle-row"><div><label for="notify_stream">实时开播与下播提醒</label><p class="hint">使用弹幕事件源中的直播状态变化。</p></div><input id="notify_stream" type="checkbox" role="switch"></div>
+          <div class="toggle-row"><div><label for="notify_live_end">轮询时提醒下播</label><p class="hint">对“开播提醒房间”同时推送下播消息。</p></div><input id="notify_live_end" type="checkbox" role="switch"></div>
+          <div class="toggle-row"><label for="notify_superchat">醒目留言提醒</label><input id="notify_superchat" type="checkbox" role="switch"></div>
+        </section>
+      </section>
+
+      <section id="connection" role="tabpanel" aria-labelledby="tab-connection" hidden>
+        <section class="panel settings-panel">
+          <div class="panel-heading"><h2>事件源</h2></div>
+          <label for="bridge_url">Event Bridge 地址</label><input id="bridge_url" placeholder="留空时直接连接 B 站；或填 wss://…" autocomplete="off">
+          <p class="hint">使用现有 Bridge 时，监听房间填写正式房间号。</p>
+          <div class="secret-field"><label for="bridge_token">Bridge Token</label><div class="input-action"><input id="bridge_token" type="password" autocomplete="new-password"><button type="button" data-clear-secret="bridge_token">清除已保存值</button></div></div>
+          <div class="divider"></div>
+          <h2>B 站登录凭证</h2><p class="hint credential-hint">匿名连接受限或缺少用户 UID 时，填写自己账号的 Cookie 字段值。密码框留空会沿用已保存值。</p>
+          <div class="secret-field"><label for="bili_sessdata">SESSDATA</label><div class="input-action"><input id="bili_sessdata" type="password" autocomplete="new-password"><button type="button" data-clear-secret="bili_sessdata">清除已保存值</button></div></div>
+          <div class="secret-field"><label for="bili_buvid3">buvid3</label><div class="input-action"><input id="bili_buvid3" type="password" autocomplete="new-password"><button type="button" data-clear-secret="bili_buvid3">清除已保存值</button></div></div>
+          <label for="bili_dedeuserid">登录账号 UID</label><input id="bili_dedeuserid" placeholder="提供 Cookies 的账号 UID" autocomplete="off" inputmode="numeric">
+        </section>
+      </section>
+    </form>
+
+    <footer><span id="save-hint">保存后重新连接事件源并应用订阅。</span><span id="updated-at">等待状态更新</span></footer>
+  </main>
+</body>
+</html>

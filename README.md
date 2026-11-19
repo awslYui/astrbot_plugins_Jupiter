@@ -1,14 +1,24 @@
 # Jupiter 直播与动态通知
 
-v0.2.0 将原有的 Jupiter 和 EoP AstrBot 插件合并到一个插件中。它监听 B 站直播间弹幕，并轮询 B 站动态、开播状态与 RSS、Atom、JSON 订阅源，统一向绑定的 AstrBot 会话推送通知。功能设计参考 [LAPLACE Jupiter](https://github.com/laplace-live/jupiter) 和 [LAPLACE EoP](https://laplace.live/eye-of-providence)。
+v0.3.0 提供 AstrBot 内置管理面板，并整合 Jupiter 和 EoP 的通知功能。它监听 B 站直播间弹幕，并轮询 B 站动态、开播状态与 RSS、Atom、JSON 订阅源，统一向绑定的 AstrBot 会话推送通知。功能设计参考 [LAPLACE Jupiter](https://github.com/laplace-live/jupiter) 和 [LAPLACE EoP](https://laplace.live/eye-of-providence)。
 
 ## 安装与升级
 
-1. 在 AstrBot WebUI 的 **插件 → 安装插件（+）→ 从链接安装** 中填入本仓库地址，或更新已安装的 Jupiter。需要 AstrBot 4.18.0+，QQ 侧使用支持主动消息的适配器，例如 OneBot v11。[仓库地址](https://github.com/awslYui/astrbot_plugins_Jupiter) · [AstrBot 插件安装](https://docs.astrbot.app/use/plugin.html)
+1. 在 AstrBot WebUI 的 **插件 → 安装插件（+）→ 从链接安装** 中填入本仓库地址，或更新已安装的 Jupiter。需要 AstrBot 4.26.0+，QQ 侧使用支持主动消息的适配器，例如 OneBot v11。[仓库地址](https://github.com/awslYui/astrbot_plugins_Jupiter) · [AstrBot 插件安装](https://docs.astrbot.app/use/plugin.html)
 2. 如果此前安装了独立 EoP，先在 WebUI 停用它，再更新 Jupiter。合并版第一次启动会查找旧 EoP 的配置，导入动态 UID、房间号、订阅地址和去重记录。Jupiter 已填写的群绑定与 Cookies 优先使用。导入情况可用 `/jupiter_status` 查看。
-3. 在合并版的 WebUI 配置中填写需要的房间或订阅来源，保存后重载。用 AstrBot 管理员账号在目标 QQ 群发 `/jupiter_bind`，再发 `/jupiter_test`，确认实际收到测试消息。
+3. 打开下方的管理面板，填写需要的房间或订阅来源，点击“保存并应用”。用 AstrBot 管理员账号在目标 QQ 群发 `/jupiter_bind`，再发 `/jupiter_test`，确认实际收到测试消息。若使用 AstrBot 通用插件配置表单，保存后需重载插件。
 
 若旧版本已经卡在卸载阶段，先停止 AstrBot，在停止状态下替换插件文件，再启动。旧配置通常在 `data/config/`，订阅记录在 `data/plugin_data/`。[AstrBot OneBot v11](https://docs.astrbot.app/platform/aiocqhttp.html)
+
+## 管理面板
+
+更新并重载后，在 **AstrBot WebUI → 插件 → Jupiter → 插件详情 → 管理面板** 打开。页面沿用 AstrBot 的登录权限和明暗主题。
+
+- **监听与订阅** 可添加、删除直播间，编辑动态 UID、开播房间和 RSS 地址，并查看连接和轮询状态。
+- **通知设置** 可编辑统一推送会话、轮询间隔和通知开关，也可测试已保存的推送目标。
+- **连接与凭证** 可配置现有 Bridge 和 B 站凭证。已保存的敏感字符串用配置状态展示，留空沿用，点击清除后保存可删除。
+
+点击 **保存并应用** 会校验并保存配置，停止旧监听实例，再用新设置启动监听。全部后台任务继续使用 3 秒关闭等待上限。其他会话同时修改设置时，页面会提示重新载入，避免覆盖修改。
 
 ## 配置
 

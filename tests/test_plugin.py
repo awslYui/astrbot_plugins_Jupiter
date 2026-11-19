@@ -29,6 +29,11 @@ class Context:
     def __init__(self):
         self.sent = []
         self.fail = False
+        self.registered_web_apis = []
+
+    def register_web_api(self, route, handler, methods, description):
+        self.registered_web_apis[:] = [entry for entry in self.registered_web_apis if entry[0] != route]
+        self.registered_web_apis.append((route, handler, methods, description))
 
     async def send_message(self, target, chain):
         if self.fail:
@@ -67,6 +72,7 @@ def load_plugin():
             AstrMessageEvent=Event, MessageChain=Chain,
             filter=SimpleNamespace(command=decorator, permission_type=decorator, PermissionType=SimpleNamespace(ADMIN=1)),
         ),
+        'astrbot.api.web': SimpleNamespace(request=SimpleNamespace()),
         'astrbot.api.star': SimpleNamespace(Star=Star, Context=Context, StarTools=tools),
     }
     spec = importlib.util.spec_from_file_location('jupiter_fixture', ROOT / 'main.py', submodule_search_locations=[str(ROOT)])
@@ -76,10 +82,12 @@ def load_plugin():
         spec.loader.exec_module(plugin)
         subscriptions = sys.modules['jupiter_fixture.subscriptions']
         lifecycle = sys.modules['jupiter_fixture.lifecycle']
-    return plugin, subscriptions, lifecycle, tools
+        runtime = sys.modules['jupiter_fixture.runtime']
+        webui = sys.modules['jupiter_fixture.webui']
+    return plugin, subscriptions, lifecycle, tools, runtime, webui
 
 
-PLUGIN, SUBSCRIPTIONS, LIFECYCLE, TOOLS = load_plugin()
+PLUGIN, SUBSCRIPTIONS, LIFECYCLE, TOOLS, RUNTIME, WEBUI = load_plugin()
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
@@ -98,11 +106,18 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.config = Config({key: field['default'] for key, field in schema.items()})
         self.config['target_umo'] = Event.unified_msg_origin
         self.context = Context()
-        self.plugin = PLUGIN.Jupiter(self.context, self.config)
-        self.addAsyncCleanup(self.plugin.terminate)
+        self.owner = PLUGIN.Jupiter(self.context, self.config)
+        self.plugin = self.owner.runtime
+        self.addAsyncCleanup(self.owner.terminate)
 
     async def pause_polling(self):
         await asyncio.Future()
+
+    async def test_plugin_page_entry_uses_supported_pages_directory(self):
+        page = ROOT / 'pages' / '管理面板'
+        self.assertTrue((page / 'index.html').is_file())
+        self.assertTrue((page / 'app.js').is_file())
+        self.assertTrue((page / 'style.css').is_file())
 
     async def test_single_plugin_and_subscription_only(self):
         stars = [value for value in vars(PLUGIN).values() if isinstance(value, type) and value is not Star and issubclass(value, Star)]
@@ -115,11 +130,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.initialize()
         self.assertIs(self.plugin.subscriptions.task, task)
         self.assertFalse(self.plugin.tasks)
-        replies = [reply async for reply in self.plugin.show_status(Event())]
+        replies = [reply async for reply in self.owner.show_status(Event())]
         self.assertIn('45', replies[0])
-        self.assertEqual([reply async for reply in self.plugin.bind(Event())][0].startswith('Jupiter'), True)
+        self.assertEqual([reply async for reply in self.owner.bind(Event())][0].startswith('Jupiter'), True)
         self.assertTrue(self.config.saves)
-        replies = [reply async for reply in self.plugin.test(Event())]
+        replies = [reply async for reply in self.owner.test(Event())]
         self.assertTrue(replies)
         self.assertEqual(len(self.context.sent), 1)
 
@@ -260,7 +275,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.config['legacy_eop_imported'])
         self.assertEqual(json.loads(legacy_path.read_text())['target_umo'], 'qq:GroupMessage:999')
         await self.plugin.terminate()
-        restarted = PLUGIN.Jupiter(self.context, self.config)
+        restarted = RUNTIME.MonitorRuntime(self.context, self.config)
         restarted.subscriptions.poll = self.pause_polling
         try:
             await restarted.initialize()
@@ -337,9 +352,9 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         for _ in range(20):
             config = Config(self.config, rooms=['123:45'], bili_uids=['45'])
-            plugin = PLUGIN.Jupiter(self.context, config)
+            plugin = RUNTIME.MonitorRuntime(self.context, config)
             plugin.subscriptions.poll = self.pause_polling
-            with patch.object(PLUGIN.live, 'LiveDanmaku', Client):
+            with patch.object(RUNTIME.live, 'LiveDanmaku', Client):
                 await plugin.initialize()
                 await asyncio.sleep(0)
                 client = plugin.clients[123]
@@ -350,6 +365,85 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(plugin.subscriptions.task.done())
                 self.assertTrue(all(task.done() for task in children))
                 self.assertTrue(all(task.done() for task in plugin.tasks | plugin.cleanup_tasks))
+
+    async def test_webui_routes_follow_plugin_lifetime(self):
+        await self.owner.initialize()
+        self.assertEqual(len(self.context.registered_web_apis), 3)
+        await self.owner.initialize()
+        self.assertEqual(len(self.context.registered_web_apis), 3)
+        replacement = PLUGIN.Jupiter(self.context, self.config)
+        try:
+            await replacement.initialize()
+            self.owner.webui.unregister()
+            self.assertEqual(len(self.context.registered_web_apis), 3)
+            self.assertTrue(all(getattr(entry[1], '__self__') is replacement.webui for entry in self.context.registered_web_apis))
+        finally:
+            await replacement.terminate()
+        self.assertFalse(self.context.registered_web_apis)
+
+    async def web_save(self, settings, expected_revision=None):
+        async def body():
+            return {'revision': expected_revision or WEBUI.revision(self.config), 'settings': settings}
+
+        with patch.object(WEBUI.request, 'json', body, create=True):
+            return await self.owner.webui.save()
+
+    async def test_webui_state_masks_secrets(self):
+        self.config.update(bili_sessdata='private-cookie', bridge_token='private-token')
+        response = await self.owner.webui.state()
+        text = json.dumps(response)
+        self.assertNotIn('private-cookie', text)
+        self.assertNotIn('private-token', text)
+        self.assertTrue(response['data']['secrets_configured']['bili_sessdata'])
+
+    async def test_webui_save_keeps_old_runtime_stopped(self):
+        self.config['bili_sessdata'] = 'private-cookie'
+        await self.owner.initialize()
+        old = self.owner.runtime
+        response = await self.web_save({'interval_seconds': 180, 'bili_uids': ['45']})
+        self.assertEqual(response['status'], 'ok')
+        self.assertEqual(self.config['interval_seconds'], 180)
+        self.assertEqual(self.config['bili_sessdata'], 'private-cookie')
+        self.assertTrue(old.stopping)
+        self.assertIsNot(self.owner.runtime, old)
+        self.assertFalse(self.owner.runtime.stopping)
+        with self.assertRaises(asyncio.CancelledError):
+            await old.send_notification(Event.unified_msg_origin, 'late notification')
+        self.assertTrue(self.owner.runtime.subscriptions.task)
+
+    async def test_webui_rejects_invalid_and_stale_settings(self):
+        await self.owner.initialize()
+        before = dict(self.config)
+        old = self.owner.runtime
+        for settings in ({'rooms': ['bad']}, {'interval_seconds': 1}, {'gift_min_yuan': -1}, {'legacy_eop_imported': True}):
+            response = await self.web_save(settings)
+            self.assertEqual(response['status'], 'error')
+            self.assertEqual(dict(self.config), before)
+            self.assertIs(self.owner.runtime, old)
+            self.assertFalse(old.stopping)
+        response = await self.web_save({'interval_seconds': 180}, expected_revision='stale')
+        self.assertEqual(response['status'], 'error')
+
+    async def test_webui_clear_secret_and_storage_failure(self):
+        self.config['bili_sessdata'] = 'private-cookie'
+        response = await self.web_save({'bili_sessdata': None})
+        self.assertEqual(response['status'], 'ok')
+        self.assertEqual(self.config['bili_sessdata'], '')
+        old = self.owner.runtime
+        with patch.object(self.config, 'save_config', side_effect=OSError):
+            response = await self.web_save({'interval_seconds': 180})
+        self.assertEqual(response['status'], 'error')
+        self.assertEqual(self.config['interval_seconds'], 120)
+        self.assertIs(self.owner.runtime, old)
+        self.assertFalse(old.stopping)
+
+    async def test_webui_send_uses_saved_target(self):
+        result = await self.owner.webui.test()
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(self.context.sent[0][0], Event.unified_msg_origin)
+        self.context.fail = True
+        result = await self.owner.webui.test()
+        self.assertEqual(result['status'], 'error')
 
 
 if __name__ == '__main__':
