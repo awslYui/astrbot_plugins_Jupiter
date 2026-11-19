@@ -1,10 +1,16 @@
 # Jupiter 直播间通知 · AstrBot 插件
 
+## v0.1.1 重载修复
+
+关闭流程最多等待后台任务 3 秒。连接中、已连接和连接失败时均会清理本实例的弹幕回调、心跳任务与 WebSocket。停止后的实例拒绝新的弹幕通知和重连，重复初始化或关闭也可安全处理。
+
+若 v0.1.0 已卡在卸载阶段，先停止 AstrBot 进程或容器，在停止状态下将本仓库最新版源码替换到对应插件目录，再启动 AstrBot。旧实例正在执行的关闭代码需要通过结束旧进程退出。保留 `data/config/` 中的插件配置。
+
 监听 B 站直播间，按账号 UID 转发主播和额外关注用户的普通弹幕。插件默认直连 B 站，QQ 通知通过当前 AstrBot 的主动消息接口发送。已有 LAPLACE Event Bridge 时，可以在配置中选用该事件源。[Jupiter 原项目](https://github.com/laplace-live/jupiter) · [AstrBot 主动消息](https://docs.astrbot.app/dev/star/guides/send-message.html)
 
 ## 安装与使用
 
-1. 在 AstrBot WebUI 打开 **插件 → 安装插件（+）→ 从链接安装**，填入 [本仓库地址](https://github.com/awslYui/astrbot_plugins_Jupiter)。已有 `astrbot_plugin_jupiter.zip` 时也可从文件安装。需要 AstrBot 4.18.0 或更高版本，以及支持主动消息的 QQ 适配器，例如 OneBot v11。若 WebUI 提示缺依赖，查看插件日志，在 AstrBot 的运行环境中按 `requirements.txt` 安装。[安装插件](https://docs.astrbot.app/use/plugin.html) · [OneBot v11](https://docs.astrbot.app/platform/aiocqhttp.html)
+1. 在 AstrBot WebUI 打开 **插件 → 安装插件（+）→ 从链接安装**，填入 [本仓库地址](https://github.com/awslYui/astrbot_plugins_Jupiter)。也可从文件安装 `astrbot_plugin_jupiter.zip`。需要 AstrBot 4.18.0 或更高版本，以及支持主动消息的 QQ 适配器，例如 OneBot v11。若 WebUI 提示缺依赖，查看插件日志，在 AstrBot 的运行环境中按 `requirements.txt` 安装。[安装插件](https://docs.astrbot.app/use/plugin.html) · [OneBot v11](https://docs.astrbot.app/platform/aiocqhttp.html)
 2. 打开插件配置，在「直播间与主播 UID」里新增一项，格式为 `房间号:主播UID`，例如 `123456:987654321`。房间号取自直播间地址，UID 取自主播空间地址。这是两个不同字段。保存后重载插件。
 3. 用 AstrBot 管理员账号在目标 QQ 群发 `/jupiter_bind`，再发 `/jupiter_test`。确认群里收到独立的「QQ 主动推送测试」消息。
 4. 发 `/jupiter_status` 检查连接和收到的弹幕条数。在房间未开播时，等主播真实发言，或用自己的测试直播间和主播账号发一条测试弹幕。

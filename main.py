@@ -1,7 +1,7 @@
 import asyncio
 import json
-from contextlib import suppress
 from time import time
+from weakref import WeakSet
 
 import aiohttp
 from astrbot.api import AstrBotConfig, logger
@@ -9,6 +9,28 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 from bilibili_api import Credential, live
 from yarl import URL
+
+
+SHUTDOWN_TIMEOUT = 3.0
+
+
+def consume_task(task):
+    if not task.cancelled():
+        task.exception()
+
+
+async def finish_tasks(tasks):
+    tasks = set(tasks) - {asyncio.current_task()}
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_TIMEOUT)
+    for task in done:
+        consume_task(task)
+    for task in pending:
+        task.cancel()
+        task.add_done_callback(consume_task)
+    if pending:
+        logger.warning('[Jupiter] %s 个后台任务未在关闭时限内退出，已隔离旧实例', len(pending))
 
 
 def positive_id(value):
@@ -66,7 +88,10 @@ class Jupiter(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.tasks = []
+        self.tasks = set()
+        self.cleanup_tasks = set()
+        self.closed_clients = WeakSet()
+        self.bridge_session = None
         self.clients = {}
         self.rooms = {}
         self.status = {}
@@ -76,6 +101,8 @@ class Jupiter(Star):
         self.outbox = asyncio.Queue(maxsize=100)
 
     async def initialize(self):
+        if self.stopping or self.tasks:
+            return
         try:
             self.rooms = room_config(self.config['rooms'], self.config['extra_uids'])
             bridge = URL(self.config.get('bridge_url', '').strip())
@@ -87,22 +114,47 @@ class Jupiter(Star):
             return
         if not self.rooms:
             return
-        self.tasks.append(asyncio.create_task(self.deliver()))
+        self.tasks.add(asyncio.create_task(self.deliver()))
         if bridge:
-            self.tasks.append(asyncio.create_task(self.watch_bridge(bridge)))
+            self.tasks.add(asyncio.create_task(self.watch_bridge(bridge)))
         else:
-            self.tasks.extend(asyncio.create_task(self.watch_room(room)) for room in self.rooms)
+            self.tasks.update(asyncio.create_task(self.watch_room(room)) for room in self.rooms)
 
     async def terminate(self):
         self.stopping = True
-        for client in self.clients.values():
-            if client.get_status() == live.LiveDanmaku.STATUS_ESTABLISHED:
-                with suppress(Exception):
-                    await asyncio.wait_for(client.disconnect(), timeout=3)
-            client.remove_all_event_listener()
+        for client in list(self.clients.values()):
+            self.stop_client(client)
         for task in self.tasks:
-            task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+            if task is not asyncio.current_task():
+                task.cancel()
+        if self.bridge_session is not None:
+            task = asyncio.create_task(self.bridge_session.close())
+            self.cleanup_tasks.add(task)
+            task.add_done_callback(consume_task)
+        await finish_tasks(self.tasks | self.cleanup_tasks)
+
+    def stop_client(self, client):
+        if client in self.closed_clients:
+            return
+        self.closed_clients.add(client)
+        client.remove_all_event_listener()
+        # bilibili-api 17.4.2 has no public close method for a connecting or
+        # failed LiveDanmaku. Its two task sets also outlive connect().
+        for attribute in ('_LiveDanmaku__tasks', '_AsyncEvent__tasks'):
+            tasks = list(getattr(client, attribute, ()))
+            for task in tasks:
+                if task is not asyncio.current_task():
+                    task.cancel()
+                    self.tasks.add(task)
+                    task.add_done_callback(self.tasks.discard)
+                    task.add_done_callback(consume_task)
+        transport = getattr(client, '_LiveDanmaku__client', None)
+        socket = getattr(client, '_LiveDanmaku__ws', None)
+        if transport is not None and socket is not None:
+            task = asyncio.create_task(transport.ws_close(socket))
+            self.cleanup_tasks.add(task)
+            task.add_done_callback(self.cleanup_tasks.discard)
+            task.add_done_callback(consume_task)
 
     async def watch_room(self, room):
         credential = Credential(
@@ -110,24 +162,31 @@ class Jupiter(Star):
             dedeuserid=self.config.get('bili_dedeuserid') or None,
             buvid3=self.config.get('bili_buvid3') or None,
         )
-        client = live.LiveDanmaku(room, credential=credential, max_retry=0, retry_after=3)
-        self.clients[room] = client
-
         async def notice(packet):
+            if self.stopping:
+                return
             kind = packet.get('type')
             if kind == 'VERIFICATION_SUCCESSFUL':
                 self.status[room] = '已连接'
             elif isinstance(packet.get('data'), dict):
                 self.handle_event(room, kind, packet['data'])
 
-        client.add_event_listener('ALL', notice)
         delay = 5
         while not self.stopping:
+            client = live.LiveDanmaku(room, credential=credential, max_retry=0, retry_after=3)
+            self.clients[room] = client
+            client.add_event_listener('ALL', notice)
             self.status[room] = '连接中'
             try:
                 await client.connect()
+            except asyncio.CancelledError:
+                raise
             except Exception as error:
                 logger.warning('[Jupiter] 房间 %s 连接失败 (%s)', room, type(error).__name__)
+            finally:
+                self.stop_client(client)
+            if self.stopping:
+                return
             if self.status[room] == '已连接':
                 delay = 5
             self.status[room] = '断线，等待重连'
@@ -141,6 +200,7 @@ class Jupiter(Star):
             url = url.update_query(token=token)
         delay = 5
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
+            self.bridge_session = session
             while not self.stopping:
                 self.status['Bridge'] = '连接中'
                 try:
@@ -148,10 +208,14 @@ class Jupiter(Star):
                         self.status['Bridge'] = '已连接'
                         delay = 5
                         async for packet in ws:
+                            if self.stopping:
+                                return
                             if packet.type == aiohttp.WSMsgType.TEXT:
                                 await self.read_bridge(ws, packet.data)
                 except (aiohttp.ClientError, ValueError, TimeoutError) as error:
                     logger.warning('[Jupiter] Bridge 连接失败 (%s)', type(error).__name__)
+                if self.stopping:
+                    return
                 self.status['Bridge'] = '断线，等待重连'
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 120)
@@ -188,9 +252,9 @@ class Jupiter(Star):
                 logger.warning('[Jupiter] 推送积压，跳过房间 %s 的一条通知', room)
 
     async def deliver(self):
-        while True:
+        while not self.stopping:
             target, message = await self.outbox.get()
-            if target == self.config.get('target_umo', '').strip():
+            if not self.stopping and target == self.config.get('target_umo', '').strip():
                 try:
                     delivered = await self.context.send_message(target, MessageChain().message(message))
                     if not delivered:
