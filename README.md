@@ -1,36 +1,60 @@
-# Jupiter 直播间通知 · AstrBot 插件
+# Jupiter 直播与动态通知
 
-## v0.1.1 重载修复
+v0.2.0 将原有的 Jupiter 和 EoP AstrBot 插件合并到一个插件中。它监听 B 站直播间弹幕，并轮询 B 站动态、开播状态与 RSS、Atom、JSON 订阅源，统一向绑定的 AstrBot 会话推送通知。功能设计参考 [LAPLACE Jupiter](https://github.com/laplace-live/jupiter) 和 [LAPLACE EoP](https://laplace.live/eye-of-providence)。
 
-关闭流程最多等待后台任务 3 秒。连接中、已连接和连接失败时均会清理本实例的弹幕回调、心跳任务与 WebSocket。停止后的实例拒绝新的弹幕通知和重连，重复初始化或关闭也可安全处理。
+## 安装与升级
 
-若 v0.1.0 已卡在卸载阶段，先停止 AstrBot 进程或容器，在停止状态下将本仓库最新版源码替换到对应插件目录，再启动 AstrBot。旧实例正在执行的关闭代码需要通过结束旧进程退出。保留 `data/config/` 中的插件配置。
+1. 在 AstrBot WebUI 的 **插件 → 安装插件（+）→ 从链接安装** 中填入本仓库地址，或更新已安装的 Jupiter。需要 AstrBot 4.18.0+，QQ 侧使用支持主动消息的适配器，例如 OneBot v11。[仓库地址](https://github.com/awslYui/astrbot_plugins_Jupiter) · [AstrBot 插件安装](https://docs.astrbot.app/use/plugin.html)
+2. 如果此前安装了独立 EoP，先在 WebUI 停用它，再更新 Jupiter。合并版第一次启动会查找旧 EoP 的配置，导入动态 UID、房间号、订阅地址和去重记录。Jupiter 已填写的群绑定与 Cookies 优先使用。导入情况可用 `/jupiter_status` 查看。
+3. 在合并版的 WebUI 配置中填写需要的房间或订阅来源，保存后重载。用 AstrBot 管理员账号在目标 QQ 群发 `/jupiter_bind`，再发 `/jupiter_test`，确认实际收到测试消息。
 
-监听 B 站直播间，按账号 UID 转发主播和额外关注用户的普通弹幕。插件默认直连 B 站，QQ 通知通过当前 AstrBot 的主动消息接口发送。已有 LAPLACE Event Bridge 时，可以在配置中选用该事件源。[Jupiter 原项目](https://github.com/laplace-live/jupiter) · [AstrBot 主动消息](https://docs.astrbot.app/dev/star/guides/send-message.html)
+若旧版本已经卡在卸载阶段，先停止 AstrBot，在停止状态下替换插件文件，再启动。旧配置通常在 `data/config/`，订阅记录在 `data/plugin_data/`。[AstrBot OneBot v11](https://docs.astrbot.app/platform/aiocqhttp.html)
 
-## 安装与使用
+## 配置
 
-1. 在 AstrBot WebUI 打开 **插件 → 安装插件（+）→ 从链接安装**，填入 [本仓库地址](https://github.com/awslYui/astrbot_plugins_Jupiter)。也可从文件安装 `astrbot_plugin_jupiter.zip`。需要 AstrBot 4.18.0 或更高版本，以及支持主动消息的 QQ 适配器，例如 OneBot v11。若 WebUI 提示缺依赖，查看插件日志，在 AstrBot 的运行环境中按 `requirements.txt` 安装。[安装插件](https://docs.astrbot.app/use/plugin.html) · [OneBot v11](https://docs.astrbot.app/platform/aiocqhttp.html)
-2. 打开插件配置，在「直播间与主播 UID」里新增一项，格式为 `房间号:主播UID`，例如 `123456:987654321`。房间号取自直播间地址，UID 取自主播空间地址。这是两个不同字段。保存后重载插件。
-3. 用 AstrBot 管理员账号在目标 QQ 群发 `/jupiter_bind`，再发 `/jupiter_test`。确认群里收到独立的「QQ 主动推送测试」消息。
-4. 发 `/jupiter_status` 检查连接和收到的弹幕条数。在房间未开播时，等主播真实发言，或用自己的测试直播间和主播账号发一条测试弹幕。
-
-每个插件实例绑定一个 AstrBot 会话。重新执行绑定命令会切换目标。也可以直接在 WebUI 修改或清空 `target_umo`，保存后重载。
-
-## 可选配置
-
-| 配置项 | 用途 |
+| 配置项 | 填写方式 |
 | --- | --- |
-| `extra_uids` | 额外关注的 B 站 UID，适用于已配置的所有直播间 |
-| `notify_stream` / `notify_superchat` | 分别开启开播下播、醒目留言通知，默认关闭 |
-| `gift_min_yuan` | 转发达到门槛的付费礼物，单位为元，默认 `0` 关闭 |
-| `bridge_url` / `bridge_token` | 使用已有 Event Bridge。此时房间号填写正式房间号；启用鉴权的实例填 Token |
-| `bili_sessdata` / `bili_dedeuserid` / `bili_buvid3` | 直连 B 站时可选。若匿名连接被拒绝或收不到用于匹配的 UID，用自己的登录 Cookies。`bili_dedeuserid` 填提供 Cookies 的账号 UID |
+| `rooms` | 每项填写 `房间号:主播UID`，如 `123456:987654321`，监听这些房间内主播的弹幕 |
+| `extra_uids` | 额外关注用户的 B 站 UID，适用于配置的所有弹幕房间 |
+| `bili_uids` | 每项一个 B 站账号 UID，订阅该账号动态 |
+| `bili_rooms` | 每项一个直播间号，轮询开播状态 |
+| `feed_urls` | 完整的 RSS、Atom 或 JSON 订阅地址，也可用已有 RSSHub 路由 |
+| `interval_seconds` | 订阅轮询每轮结束后的等待秒数，默认 120，最低 60 |
+| `notify_stream` | 从弹幕事件源推送开播、下播，默认关闭 |
+| `notify_live_end` | 轮询房间时同时提醒下播，默认关闭 |
+| `notify_superchat` | 推送醒目留言，默认关闭 |
+| `gift_min_yuan` | 付费礼物通知最低金额，单位元，默认 `0` 关闭 |
+| `target_umo` | `/jupiter_bind` 自动填写当前群或私聊会话 |
+| `bridge_url` / `bridge_token` | 可选的现有 Event Bridge 地址与凭证。地址留空时直连 B 站 |
+| `bili_sessdata` / `bili_buvid3` | 需要登录访问 B 站时，填入自己账号对应的 Cookie 字段值 |
+| `bili_dedeuserid` | 提供登录 Cookies 的账号 UID，用于直连弹幕 |
 
-Cookies 配在 WebUI，不要发到群里。AstrBot 会遮罩显示敏感字段，配置文件里仍保存实际值。[AstrBot 配置说明](https://docs.astrbot.app/dev/star/guides/plugin-config.html) · [B 站连接库](https://github.com/Nemo2011/bilibili-api) · [Event Bridge](https://laplace.live/chat/event-bridge)
+例如，`rooms` 配置 `123456:987654321`，`bili_uids` 配置 `987654321`，即可同时接收这位主播在直播间的弹幕与账号新动态。仅填写动态 UID 或订阅地址，也可单独运行订阅功能。
 
-## 版聊验证与功能范围
+未开播房间的弹幕只要带有已配置的 UID 并由事件源送达，就会触发通知。`/jupiter_status` 显示连接状态和本次加载收到的弹幕数，实际版聊接收情况需要在目标房间验证。实时源和轮询同时报告同一房间的相同开播状态时，合并版会合并通知。短房间号会在实时源返回正式房间号后关联。[B 站连接库](https://github.com/Nemo2011/bilibili-api) · [Event Bridge](https://laplace.live/chat/event-bridge)
 
-- 未开播时，只要事件源送来包含主播 UID 的普通弹幕，通知就会触发。实际是否收到，取决于 B 站、使用的账号、房间和云服务器网络。
-- 已连接但计数一直为 0 时，先查事件源是否收到弹幕。计数上涨但主播消息没到 QQ 时，核对主播 UID、登录状态及 `/jupiter_test` 的结果。
-- 这是按 AstrBot 场景实现的版本。原 Jupiter 的下播战报、多 Bridge 分流、大航海和进房通知未移植。实时事件逐条推送，断线期间的弹幕没有历史补发。
+## 指令
+
+| 指令 | 用途 |
+| --- | --- |
+| `/jupiter_bind` | 将全部通知绑定到当前群或私聊 |
+| `/jupiter_test` | 验证向绑定会话主动发送消息 |
+| `/jupiter_status` | 查看弹幕、订阅和配置导入状态 |
+
+以上指令需要 AstrBot 管理员权限。每个插件实例绑定一个会话，重新绑定会切换全部通知的目标。
+
+## 旧 EoP 数据导入
+
+支持从 `data/config/astrbot_plugin_eop_config.json` 或 `data/config/astrbot_plugins_EoP_config.json` 导入，首次成功后记住导入结果。若同时存在两份配置，状态指令会提示手动填写订阅设置。订阅去重记录从 `data/plugin_data/astrbot_plugin_eop/subscription_state.json` 复制到 Jupiter 的数据目录。已有的 Jupiter 订阅状态优先使用。
+
+旧 EoP 和 Jupiter 的推送群如果不同，合并版采用 Jupiter 当前绑定。新的目标会话会为各订阅来源建立首次检查基线。安装目录或配置文件采用其他名称时，可以在 WebUI 将旧 EoP 的订阅项目填入合并版。
+
+## 运行与重载
+
+首次检查新的订阅来源时，插件记录当前条目与直播状态，后续变化才推送。动态与订阅去重状态保存在 `data/plugin_data/astrbot_plugin_jupiter/subscription_state.json`。通知包含正文及原文链接。
+
+关闭时同时取消弹幕、轮询和当前请求，并在总计 3 秒的等待上限内收尾。停止后的实例拒绝后续通知和状态写入。断线期间的弹幕可能遗漏，订阅来源当前已移除的旧条目也可能无法补取。
+
+依赖从 `requirements.txt` 安装到 AstrBot 实际运行的 Python 环境。Cookies 可在 WebUI 配置，敏感字段会遮罩显示，实际值存储在 AstrBot 配置文件中。[AstrBot 插件配置](https://docs.astrbot.app/dev/star/guides/plugin-config.html)
+
+安装依赖后，在仓库根目录执行 `python -m unittest discover -s tests` 可验证功能合并、配置导入和重载清理。测试使用本地网络服务和 AstrBot 接口替身，QQ 实际投递通过 `/jupiter_test` 验证。

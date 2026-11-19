@@ -10,27 +10,9 @@ from astrbot.api.star import Context, Star
 from bilibili_api import Credential, live
 from yarl import URL
 
-
-SHUTDOWN_TIMEOUT = 3.0
-
-
-def consume_task(task):
-    if not task.cancelled():
-        task.exception()
-
-
-async def finish_tasks(tasks):
-    tasks = set(tasks) - {asyncio.current_task()}
-    if not tasks:
-        return
-    done, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_TIMEOUT)
-    for task in done:
-        consume_task(task)
-    for task in pending:
-        task.cancel()
-        task.add_done_callback(consume_task)
-    if pending:
-        logger.warning('[Jupiter] %s 个后台任务未在关闭时限内退出，已隔离旧实例', len(pending))
+from .lifecycle import consume_task, finish_tasks
+from .migration import import_legacy_eop
+from .subscriptions import SubscriptionMonitor
 
 
 def positive_id(value):
@@ -98,11 +80,24 @@ class Jupiter(Star):
         self.received = {}
         self.errors = ''
         self.stopping = False
+        self.initialized = False
+        self.migration_status = ''
+        self.live_states = {}
+        self.room_aliases = {}
+        self.live_lock = asyncio.Lock()
         self.outbox = asyncio.Queue(maxsize=100)
+        self.subscriptions = SubscriptionMonitor(config, self.send_notification, self.announce_live)
 
     async def initialize(self):
-        if self.stopping or self.tasks:
+        if self.stopping or self.initialized:
             return
+        self.initialized = True
+        try:
+            self.migration_status = import_legacy_eop(self.config)
+        except (ValueError, OSError) as error:
+            self.migration_status = f'旧 EoP 设置导入失败（{type(error).__name__}），请检查 WebUI 配置'
+            logger.warning('[Jupiter] %s', self.migration_status)
+        await self.subscriptions.initialize()
         try:
             self.rooms = room_config(self.config['rooms'], self.config['extra_uids'])
             bridge = URL(self.config.get('bridge_url', '').strip())
@@ -122,6 +117,7 @@ class Jupiter(Star):
 
     async def terminate(self):
         self.stopping = True
+        subscription_tasks = self.subscriptions.stop()
         for client in list(self.clients.values()):
             self.stop_client(client)
         for task in self.tasks:
@@ -131,7 +127,26 @@ class Jupiter(Star):
             task = asyncio.create_task(self.bridge_session.close())
             self.cleanup_tasks.add(task)
             task.add_done_callback(consume_task)
-        await finish_tasks(self.tasks | self.cleanup_tasks)
+        await finish_tasks(self.tasks | self.cleanup_tasks | subscription_tasks)
+
+    async def send_notification(self, target, text):
+        if self.stopping or asyncio.current_task().cancelling():
+            raise asyncio.CancelledError
+        if target != self.config.get('target_umo', '').strip():
+            raise RuntimeError('推送目标已改变')
+        return await self.context.send_message(target, MessageChain().message(text))
+
+    async def announce_live(self, target, room, current):
+        async with self.live_lock:
+            room = self.room_aliases.get(room, room)
+            key = (target, room)
+            if self.live_states.get(key) is current:
+                return
+            action = '开播' if current else '下播'
+            sent = await self.send_notification(target, f'【Jupiter · {action}】B 站直播间 {room}\nhttps://live.bilibili.com/{room}')
+            if not sent:
+                raise RuntimeError('AstrBot 找不到绑定会话的适配器')
+            self.live_states[key] = current
 
     def stop_client(self, client):
         if client in self.closed_clients:
@@ -165,6 +180,9 @@ class Jupiter(Star):
         async def notice(packet):
             if self.stopping:
                 return
+            real_room = positive_id(packet.get('room_real_id'))
+            if real_room:
+                self.room_aliases[room] = real_room
             kind = packet.get('type')
             if kind == 'VERIFICATION_SUCCESSFUL':
                 self.status[room] = '已连接'
@@ -246,18 +264,22 @@ class Jupiter(Star):
         target = self.config.get('target_umo', '').strip()
         if target and (text := label_event(kind, raw, self.rooms[room], self.config)):
             message = f'【Jupiter · 房间 {room}】{text[:700]}\nhttps://live.bilibili.com/{room}'
+            stream = None
+            if kind in {'LIVE', 'live-start', 'PREPARING', 'live-end'}:
+                stream = (room, kind in {'LIVE', 'live-start'})
             try:
-                self.outbox.put_nowait((target, message))
+                self.outbox.put_nowait((target, message, stream))
             except asyncio.QueueFull:
                 logger.warning('[Jupiter] 推送积压，跳过房间 %s 的一条通知', room)
 
     async def deliver(self):
         while not self.stopping:
-            target, message = await self.outbox.get()
+            target, message, stream = await self.outbox.get()
             if not self.stopping and target == self.config.get('target_umo', '').strip():
                 try:
-                    delivered = await self.context.send_message(target, MessageChain().message(message))
-                    if not delivered:
+                    if stream is not None:
+                        await self.announce_live(target, *stream)
+                    elif not await self.send_notification(target, message):
                         logger.warning('[Jupiter] AstrBot 找不到绑定会话的适配器')
                 except Exception as error:
                     logger.warning('[Jupiter] QQ 通知发送失败 (%s)', type(error).__name__)
@@ -278,7 +300,7 @@ class Jupiter(Star):
             yield event.plain_result('请在目标会话先执行 /jupiter_bind。')
             return
         try:
-            sent = await self.context.send_message(target, MessageChain().message('【Jupiter】QQ 主动推送测试'))
+            sent = await self.send_notification(target, '【Jupiter】弹幕与动态订阅统一推送测试')
         except Exception as error:
             yield event.plain_result(f'主动推送失败（{type(error).__name__}），请检查 AstrBot 的 QQ 适配器。')
             return
@@ -290,10 +312,16 @@ class Jupiter(Star):
         lines = ['Jupiter 已绑定会话' if self.config.get('target_umo') else 'Jupiter 尚未绑定会话']
         if self.errors:
             lines.append(self.errors)
+        if self.migration_status:
+            lines.append(self.migration_status)
         if 'Bridge' in self.status:
             lines.append(f'Bridge：{self.status["Bridge"]}')
         for room in self.rooms:
             lines.append(f'房间 {room}：{self.status.get(room, "等待事件源")}，本次加载收到弹幕 {self.received.get(room, 0)} 条')
-        if not self.rooms and not self.errors:
-            lines.append('请在 WebUI 配置直播间，然后重载插件。')
+        if self.subscriptions.problem:
+            lines.append(self.subscriptions.problem)
+        for _, _, label in self.subscriptions.sources:
+            lines.append(f'{label}：{self.subscriptions.status.get(label, "等待首次检查")}')
+        if not self.rooms and not self.subscriptions.sources and not self.errors:
+            lines.append('请在 WebUI 配置直播间或动态订阅，然后重载插件。')
         yield event.plain_result('\n'.join(lines))
