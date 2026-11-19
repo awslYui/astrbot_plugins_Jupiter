@@ -8,11 +8,11 @@ from astrbot.api.web import request
 from yarl import URL
 
 from .lifecycle import consume_task
-from .runtime import room_config
+from .runtime import room_config, room_name_config, tracking_settings
 from .subscriptions import sources_from_config
 
 
-VERSION = '0.3.1'
+VERSION = '0.4.0'
 PLUGIN_NAME = 'astrbot_plugin_jupiter'
 SECRET_FIELDS = ('bridge_token', 'bili_sessdata', 'bili_buvid3')
 SCHEMA = json.loads((Path(__file__).parent / '_conf_schema.json').read_text(encoding='utf-8'))
@@ -51,12 +51,14 @@ def validated_config(config, settings):
         updated[key] = value
     if updated['interval_seconds'] < 60:
         raise ValueError('订阅轮询间隔至少为 60 秒')
+    if updated.get('live_interval_seconds', 30) < 5:
+        raise ValueError('直播状态轮询间隔至少为 5 秒')
+    if len(updated.get('danmaku_prefix', '')) > 200 or '\n' in updated.get('danmaku_prefix', ''):
+        raise ValueError('直播间通知前缀需要填写 200 字以内的单行文本')
     if updated['gift_min_yuan'] < 0:
         raise ValueError('礼物通知金额应大于或等于 0')
-    room_config(updated['rooms'], updated['extra_uids'])
-    for value in updated['extra_uids']:
-        if not value.isascii() or not value.isdecimal() or not 0 < len(value) <= 20 or not int(value):
-            raise ValueError('额外关注 UID 需要填写正整数')
+    updated['rooms'], updated['extra_uids'] = tracking_settings(updated['rooms'], updated['extra_uids'])
+    room_name_config(updated.get('room_names', []))
     sources_from_config(updated)
     bridge = URL(updated['bridge_url'])
     if bridge and (bridge.scheme not in {'ws', 'wss'} or not bridge.host):
@@ -86,15 +88,19 @@ class PluginWebUI:
         settings = {key: config.get(key, field['default']) for key, field in SCHEMA.items() if key in EDITABLE_FIELDS and key not in SECRET_FIELDS}
         rooms = []
         for line in settings['rooms']:
-            room, _, uid = line.partition(':')
+            room = line.partition(':')[0]
             room_id = int(room) if room.isdecimal() and len(room) <= 20 else 0
             rooms.append({
-                'room_id': room, 'uid': uid,
+                'room_id': room, 'name': runtime.room_names.get(room_id, ''),
                 'status': runtime.status.get(room_id, runtime.status.get('Bridge', '等待连接')),
                 'messages': runtime.received.get(room_id, 0),
+                'matched': runtime.matched.get(room_id, 0),
+                'sent': runtime.sent.get(room_id, 0),
             })
         sources = [{'name': label, 'status': runtime.subscriptions.status.get(label, '等待首次检查')} for _, _, label in runtime.subscriptions.sources]
         warnings = [value for value in (runtime.errors, runtime.subscriptions.problem, runtime.migration_status) if value]
+        if rooms and not settings['extra_uids']:
+            warnings.append('尚未配置关注 UID，收到的普通弹幕不会转发')
         return {
             'version': VERSION, 'revision': revision(config), 'settings': settings,
             'secrets_configured': {key: bool(config.get(key)) for key in SECRET_FIELDS},

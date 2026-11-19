@@ -22,18 +22,45 @@ def positive_id(value):
     return (int(value) or None) if len(value) <= 20 and value.isascii() and value.isdecimal() else None
 
 
-def room_config(lines, extra_uids):
-    watched = {uid for value in extra_uids if (uid := positive_id(value)) is not None}
-    rooms = {}
+def tracking_settings(lines, extra_uids):
+    watched = []
+    for value in extra_uids:
+        uid = positive_id(value)
+        if uid is None:
+            raise ValueError('关注 UID 需要填写正整数')
+        if str(uid) not in watched:
+            watched.append(str(uid))
+    rooms = []
     for line in lines:
-        room, _, streamer = str(line).partition(':')
-        room_id, streamer_uid = positive_id(room), positive_id(streamer)
-        if room_id is None or streamer_uid is None:
-            raise ValueError('每个直播间应填写 房间号:主播UID，且两个 ID 均为正整数')
-        if room_id in rooms:
+        room, separator, legacy_uid = str(line).partition(':')
+        room_id = positive_id(room)
+        if room_id is None or (separator and positive_id(legacy_uid) is None):
+            raise ValueError('监听房间需要填写正整数房间号')
+        if str(room_id) in rooms:
             raise ValueError(f'直播间 {room_id} 重复配置')
-        rooms[room_id] = watched | {streamer_uid}
-    return rooms
+        rooms.append(str(room_id))
+        # Preserve old targets by moving them to the independent, shared list.
+        if separator and str(positive_id(legacy_uid)) not in watched:
+            watched.append(str(positive_id(legacy_uid)))
+    return rooms, watched
+
+
+def room_config(lines, extra_uids):
+    rooms, watched = tracking_settings(lines, extra_uids)
+    return {int(room): {int(uid) for uid in watched} for room in rooms}
+
+
+def room_name_config(lines):
+    names = {}
+    for line in lines:
+        room, separator, name = str(line).partition(':')
+        room_id = positive_id(room)
+        if room_id is None or not separator or not name.strip() or len(name.strip()) > 80:
+            raise ValueError('通知名称应填写 房间号:名称，名称为 1～80 个字符')
+        if room_id in names:
+            raise ValueError(f'直播间 {room_id} 的通知名称重复配置')
+        names[room_id] = ' '.join(name.split())
+    return names
 
 
 def label_event(kind, raw, watched, options):
@@ -78,6 +105,11 @@ class MonitorRuntime:
         self.rooms = {}
         self.status = {}
         self.received = {}
+        self.matched = {}
+        self.sent = {}
+        self.room_names = {}
+        self.name_retry_at = {}
+        self.metadata_session = None
         self.errors = ''
         self.stopping = False
         self.initialized = False
@@ -99,11 +131,23 @@ class MonitorRuntime:
             logger.warning('[Jupiter] %s', self.migration_status)
         await self.subscriptions.initialize()
         try:
+            rooms, watched = tracking_settings(self.config['rooms'], self.config['extra_uids'])
+            if rooms != self.config['rooms'] or watched != self.config['extra_uids']:
+                previous = dict(self.config)
+                self.config.update(rooms=rooms, extra_uids=watched)
+                try:
+                    self.config.save_config()
+                except Exception:
+                    self.config.clear()
+                    self.config.update(previous)
+                    raise
+                self.migration_status = '\n'.join(filter(None, (self.migration_status, '已将旧房间绑定的 UID 合并到独立关注列表，请按需编辑')))
+            self.room_names = room_name_config(self.config.get('room_names', []))
             self.rooms = room_config(self.config['rooms'], self.config['extra_uids'])
             bridge = URL(self.config.get('bridge_url', '').strip())
             if bridge and (bridge.scheme not in {'ws', 'wss'} or not bridge.host):
                 raise ValueError('Event Bridge 地址应为 ws:// 或 wss:// 开头的完整地址')
-        except ValueError as error:
+        except (ValueError, OSError) as error:
             self.errors = str(error)
             logger.warning('[Jupiter] %s', self.errors)
             return
@@ -128,7 +172,47 @@ class MonitorRuntime:
             task = asyncio.create_task(self.bridge_session.close())
             self.cleanup_tasks.add(task)
             task.add_done_callback(consume_task)
+        if self.metadata_session is not None:
+            task = asyncio.create_task(self.metadata_session.close())
+            self.cleanup_tasks.add(task)
+            task.add_done_callback(consume_task)
         await finish_tasks(self.tasks | self.cleanup_tasks | subscription_tasks)
+
+    async def room_prefix(self, room):
+        real_room = self.room_aliases.get(room, room)
+        name = self.room_names.get(room) or self.room_names.get(real_room)
+        template = self.config.get('danmaku_prefix', '【{主播名}直播间】')
+        if '{主播名}' in template and not name and self.name_retry_at.get(real_room, 0) <= time():
+            self.name_retry_at[real_room] = time() + 300
+            try:
+                if self.metadata_session is None:
+                    self.metadata_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+                async with asyncio.timeout(5):
+                    async with self.metadata_session.get(
+                        'https://api.live.bilibili.com/room/v1/Room/get_info', params={'room_id': real_room},
+                        headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://live.bilibili.com/'},
+                    ) as response:
+                        response.raise_for_status()
+                        payload = await response.json()
+                    if payload.get('code') != 0 or positive_id(payload['data'].get('uid')) is None:
+                        raise ValueError('直播间信息暂不可用')
+                    async with self.metadata_session.get(
+                        'https://api.live.bilibili.com/live_user/v1/Master/info', params={'uid': payload['data']['uid']},
+                        headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://live.bilibili.com/'},
+                    ) as response:
+                        response.raise_for_status()
+                        payload = await response.json()
+                    if payload.get('code') != 0:
+                        raise ValueError('主播信息暂不可用')
+                    name = payload['data']['info']['uname']
+                    if isinstance(name, str) and name.strip():
+                        name = ' '.join(name.split())[:80]
+                        self.room_names[room] = self.room_names[real_room] = name
+            except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError, AttributeError):
+                logger.warning('[Jupiter] 房间 %s 的主播名暂未获取，可在管理面板填写通知名称', room)
+        if self.stopping:
+            raise asyncio.CancelledError
+        return template.replace('{主播名}', name if isinstance(name, str) and name else f'房间{room}').replace('{房间号}', str(room))
 
     async def send_notification(self, target, text):
         if self.stopping or asyncio.current_task().cancelling():
@@ -144,7 +228,8 @@ class MonitorRuntime:
             if self.live_states.get(key) is current:
                 return
             action = '开播' if current else '下播'
-            sent = await self.send_notification(target, f'【Jupiter · {action}】B 站直播间 {room}\nhttps://live.bilibili.com/{room}')
+            prefix = await self.room_prefix(room)
+            sent = await self.send_notification(target, f'{prefix}{action}了')
             if not sent:
                 raise RuntimeError('AstrBot 找不到绑定会话的适配器')
             self.live_states[key] = current
@@ -267,26 +352,32 @@ class MonitorRuntime:
             return
         if kind in {'message', 'DANMU_MSG'}:
             self.received[room] = self.received.get(room, 0) + 1
+        text = label_event(kind, raw, self.rooms[room], self.config)
+        if text and kind in {'message', 'DANMU_MSG'}:
+            self.matched[room] = self.matched.get(room, 0) + 1
         target = self.config.get('target_umo', '').strip()
-        if target and (text := label_event(kind, raw, self.rooms[room], self.config)):
-            message = f'【Jupiter · 房间 {room}】{text[:700]}\nhttps://live.bilibili.com/{room}'
+        if target and text:
             stream = None
             if kind in {'LIVE', 'live-start', 'PREPARING', 'live-end'}:
                 stream = (room, kind in {'LIVE', 'live-start'})
             try:
-                self.outbox.put_nowait((target, message, stream))
+                self.outbox.put_nowait((target, room, text[:700], stream))
             except asyncio.QueueFull:
                 logger.warning('[Jupiter] 推送积压，跳过房间 %s 的一条通知', room)
 
     async def deliver(self):
         while not self.stopping:
-            target, message, stream = await self.outbox.get()
+            target, room, text, stream = await self.outbox.get()
             if not self.stopping and target == self.config.get('target_umo', '').strip():
                 try:
                     if stream is not None:
                         await self.announce_live(target, *stream)
-                    elif not await self.send_notification(target, message):
-                        logger.warning('[Jupiter] AstrBot 找不到绑定会话的适配器')
+                    else:
+                        prefix = await self.room_prefix(room)
+                        if await self.send_notification(target, prefix + text):
+                            self.sent[room] = self.sent.get(room, 0) + 1
+                        else:
+                            logger.warning('[Jupiter] AstrBot 找不到绑定会话的适配器')
                 except Exception as error:
                     logger.warning('[Jupiter] QQ 通知发送失败 (%s)', type(error).__name__)
                 await asyncio.sleep(1)

@@ -106,6 +106,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         schema = json.loads((ROOT / '_conf_schema.json').read_text(encoding='utf-8'))
         self.config = Config({key: field['default'] for key, field in schema.items()})
         self.config['target_umo'] = Event.unified_msg_origin
+        self.config['room_names'] = ['123:测试主播']
         self.context = Context()
         self.owner = PLUGIN.Jupiter(self.context, self.config)
         self.plugin = self.owner.runtime
@@ -180,6 +181,102 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.plugin.bridge_session.closed)
         self.assertTrue(all(task.done() for task in self.plugin.tasks))
 
+    async def test_watched_user_is_independent_of_room_owner_and_notification_has_no_link(self):
+        self.plugin.rooms = RUNTIME.room_config(['22637261', '123'], ['672328094'])
+        self.plugin.room_names = {123: '另一位主播'}
+        self.plugin.tasks.add(asyncio.create_task(self.plugin.deliver()))
+        self.plugin.handle_event(123, 'DANMU_MSG', {'info': [[], '房间主播的弹幕', [45, '房间主播']]})
+        self.plugin.handle_event(123, 'DANMU_MSG', {'info': [[], '测试', [672328094, '嘉然']]})
+        self.plugin.handle_event(999, 'DANMU_MSG', {'info': [[], '未监听房间', [672328094, '嘉然']]})
+        async with asyncio.timeout(1):
+            while not self.context.sent:
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.context.sent, [(Event.unified_msg_origin, '【另一位主播直播间】嘉然：测试')])
+        self.assertEqual(self.plugin.received[123], 2)
+        self.assertEqual(self.plugin.matched[123], 1)
+        self.assertEqual(self.plugin.sent[123], 1)
+
+    async def test_custom_prefix_fixed_text_placeholders_and_empty(self):
+        self.plugin.room_names[123] = '测试主播'
+        self.config['danmaku_prefix'] = '「{主播名} / {房间号}」'
+        self.assertEqual(await self.plugin.room_prefix(123), '「测试主播 / 123」')
+        self.config['danmaku_prefix'] = '【自定义通知】'
+        self.assertEqual(await self.plugin.room_prefix(999), '【自定义通知】')
+        self.config['danmaku_prefix'] = ''
+        self.assertEqual(await self.plugin.room_prefix(999), '')
+        self.assertIsNone(self.plugin.metadata_session)
+
+    async def test_room_name_fetch_is_cached_and_session_is_closed(self):
+        import aiohttp
+        calls = []
+
+        async def serve(request):
+            calls.append(dict(request.query))
+            if request.query.get('room_id') == '555':
+                return web.json_response({'code': -352, 'data': None})
+            data = {'uid': 672328094} if 'room_id' in request.query else {'info': {'uname': '嘉然'}}
+            return web.json_response({'code': 0, 'data': data})
+
+        app = web.Application()
+        app.router.add_get('/', serve)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        site = web.TCPSite(runner, '127.0.0.1', 0)
+        await site.start()
+        session = aiohttp.ClientSession()
+        self.plugin.metadata_session = session
+        original_get = session.get
+        with patch.object(session, 'get', lambda url, **kwargs: original_get(f'http://127.0.0.1:{runner.addresses[0][1]}/', **kwargs)):
+            self.assertEqual(await self.plugin.room_prefix(22637261), '【嘉然直播间】')
+            self.assertEqual(await self.plugin.room_prefix(22637261), '【嘉然直播间】')
+            self.assertEqual(await self.plugin.room_prefix(555), '【房间555直播间】')
+            self.assertEqual(await self.plugin.room_prefix(555), '【房间555直播间】')
+        self.assertEqual(calls, [{'room_id': '22637261'}, {'uid': '672328094'}, {'room_id': '555'}])
+        await self.plugin.terminate()
+        self.assertTrue(session.closed)
+
+    async def test_legacy_room_targets_are_migrated_to_global_watch_list_once(self):
+        self.config.update(rooms=['123:45', '456:46'], extra_uids=['999'])
+
+        async def watch(room):
+            await asyncio.Future()
+
+        self.plugin.watch_room = watch
+        await self.plugin.initialize()
+        self.assertEqual(self.config['rooms'], ['123', '456'])
+        self.assertEqual(self.config['extra_uids'], ['999', '45', '46'])
+        self.assertEqual(self.plugin.rooms, {123: {999, 45, 46}, 456: {999, 45, 46}})
+        await self.plugin.initialize()
+        self.assertEqual(self.config.saves, 1)
+
+    async def test_fast_live_polling_continues_while_feed_is_slow_and_stops_cleanly(self):
+        self.config.update(bili_rooms=['123'], feed_urls=['https://example.com/feed'], live_interval_seconds=5)
+        checked_twice = asyncio.Event()
+        counts = {'live': 0, 'feed': 0}
+        delays = []
+        original_sleep = asyncio.sleep
+
+        async def check(session, credential, target, kind, value):
+            counts[kind] += 1
+            if kind == 'feed':
+                await asyncio.Future()
+            if counts['live'] >= 2:
+                checked_twice.set()
+
+        async def fast_sleep(delay):
+            delays.append(delay)
+            await original_sleep(0.001)
+
+        with patch.object(self.plugin.subscriptions, 'check', check), patch.object(SUBSCRIPTIONS.asyncio, 'sleep', fast_sleep):
+            await self.plugin.initialize()
+            await asyncio.wait_for(checked_twice.wait(), timeout=1)
+            self.assertEqual(counts['feed'], 1)
+            self.assertIn(5, delays)
+            await asyncio.wait_for(self.plugin.terminate(), timeout=1)
+        monitor = self.plugin.subscriptions
+        self.assertTrue(all(task.done() for task in (monitor.task, monitor.live_task, monitor.check_task, monitor.live_check_task)))
+
     async def test_dynamic_baseline_retry_and_restart(self):
         self.config['bili_uids'] = ['45']
         self.plugin.subscriptions.poll = self.pause_polling
@@ -237,6 +334,13 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.room_aliases[12] = 123
         await self.plugin.announce_live(Event.unified_msg_origin, 12, True)
         self.assertEqual(len(self.context.sent), 1)
+        self.assertEqual(self.context.sent[0][1], '【测试主播直播间】开播了')
+        self.config['notify_live_end'] = True
+        Room.status = 0
+        with patch.object(SUBSCRIPTIONS.live, 'LiveRoom', Room):
+            await monitor.check(None, None, Event.unified_msg_origin, 'live', 123)
+        self.assertEqual(self.context.sent[-1][1], '【测试主播直播间】下播了')
+        self.assertEqual(len(self.context.sent), 2)
 
     async def test_rss_baseline_and_new_entry(self):
         self.config['feed_urls'] = ['https://example.com/feed']
@@ -416,7 +520,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.owner.initialize()
         before = dict(self.config)
         old = self.owner.runtime
-        for settings in ({'rooms': ['bad']}, {'interval_seconds': 1}, {'gift_min_yuan': -1}, {'legacy_eop_imported': True}):
+        for settings in ({'rooms': ['bad']}, {'rooms': ['123', '0123']}, {'extra_uids': ['0']}, {'interval_seconds': 1}, {'live_interval_seconds': 4}, {'room_names': ['123:']}, {'danmaku_prefix': 'a\nb'}, {'gift_min_yuan': -1}, {'legacy_eop_imported': True}):
             response = await self.web_save(settings)
             self.assertEqual(response['status'], 'error')
             self.assertEqual(dict(self.config), before)

@@ -136,6 +136,8 @@ class SubscriptionMonitor:
         self.problem = ''
         self.task = None
         self.check_task = None
+        self.live_task = None
+        self.live_check_task = None
         self.stopping = False
         self.session = None
 
@@ -158,7 +160,7 @@ class SubscriptionMonitor:
 
     def stop(self):
         self.stopping = True
-        tasks = {self.task, self.check_task} - {None, asyncio.current_task()}
+        tasks = {self.task, self.check_task, self.live_task, self.live_check_task} - {None, asyncio.current_task()}
         for task in tasks:
             task.cancel()
         if self.session is not None:
@@ -235,36 +237,54 @@ class SubscriptionMonitor:
         )
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as session:
             self.session = session
-            while not self.stopping:
-                target = self.config.get('target_umo', '').strip()
-                if not target:
-                    await asyncio.sleep(3)
-                    continue
-                for kind, value, label in self.sources:
-                    while self.check_task is not None and not self.check_task.done():
-                        await asyncio.sleep(1)
-                    if self.stopping:
-                        return
-                    self.check_task = asyncio.create_task(self.check(session, credential, target, kind, value))
-                    self.check_task.add_done_callback(consume_task)
-                    try:
-                        done, _ = await asyncio.wait({self.check_task}, timeout=CHECK_TIMEOUT)
-                        if not done:
-                            self.check_task.cancel()
-                            raise TimeoutError
-                        await self.check_task
-                    except asyncio.CancelledError:
-                        self.check_task.cancel()
-                        raise
-                    except Exception as error:
-                        code = getattr(error, 'code', None) or getattr(error, 'status', None)
-                        detail = f'{type(error).__name__} {code}' if isinstance(code, int) else type(error).__name__
-                        state = f'检查或推送失败（{detail}）'
-                        if self.status.get(label) != state:
-                            logger.warning('[Jupiter · 订阅] %s %s', label, state)
-                        self.status[label] = state
-                    else:
-                        self.status[label] = '已检查'
+            self.live_task = asyncio.create_task(self.poll_sources(session, credential, 'live', 'live_check_task'))
+            self.live_task.add_done_callback(consume_task)
+            try:
+                await self.poll_sources(session, credential, 'other', 'check_task')
+            finally:
+                self.live_task.cancel()
+
+    async def poll_sources(self, session, credential, group, task_attribute):
+        sources = [source for source in self.sources if (source[0] == 'live') == (group == 'live')]
+        if not sources:
+            await asyncio.Future()
+        backoff = 0
+        while not self.stopping:
+            target = self.config.get('target_umo', '').strip()
+            if not target:
+                await asyncio.sleep(3)
+                continue
+            failed = False
+            for kind, value, label in sources:
+                check_task = getattr(self, task_attribute)
+                while check_task is not None and not check_task.done():
                     await asyncio.sleep(1)
-                await asyncio.sleep(max(60, int(self.config['interval_seconds'])))
+                if self.stopping:
+                    return
+                check_task = asyncio.create_task(self.check(session, credential, target, kind, value))
+                setattr(self, task_attribute, check_task)
+                check_task.add_done_callback(consume_task)
+                try:
+                    done, _ = await asyncio.wait({check_task}, timeout=CHECK_TIMEOUT)
+                    if not done:
+                        check_task.cancel()
+                        raise TimeoutError
+                    await check_task
+                except asyncio.CancelledError:
+                    check_task.cancel()
+                    raise
+                except Exception as error:
+                    failed = True
+                    code = getattr(error, 'code', None) or getattr(error, 'status', None)
+                    detail = f'{type(error).__name__} {code}' if isinstance(code, int) else type(error).__name__
+                    state = f'检查或推送失败（{detail}）'
+                    if self.status.get(label) != state:
+                        logger.warning('[Jupiter · 订阅] %s %s', label, state)
+                    self.status[label] = state
+                else:
+                    self.status[label] = '已检查'
+                await asyncio.sleep(1)
+            interval = max(5, int(self.config.get('live_interval_seconds', 30))) if group == 'live' else max(60, int(self.config['interval_seconds']))
+            backoff = min(300, max(30, backoff * 2)) if failed else 0
+            await asyncio.sleep(max(interval, backoff))
 

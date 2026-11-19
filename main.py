@@ -78,7 +78,9 @@ class Jupiter(Star):
         if 'Bridge' in self.runtime.status:
             lines.append(f'Bridge：{self.runtime.status["Bridge"]}')
         for room in self.runtime.rooms:
-            lines.append(f'房间 {room}：{self.runtime.status.get(room, "等待事件源")}，本次加载收到弹幕 {self.runtime.received.get(room, 0)} 条')
+            lines.append(f'房间 {room}：{self.runtime.status.get(room, "等待事件源")}，收到 {self.runtime.received.get(room, 0)} 条，匹配 {self.runtime.matched.get(room, 0)} 条，已发送通知 {self.runtime.sent.get(room, 0)} 条')
+        if self.runtime.rooms:
+            lines.append('关注 UID：' + ('、'.join(self.config.get('extra_uids', [])) or '尚未配置'))
         if self.runtime.subscriptions.problem:
             lines.append(self.runtime.subscriptions.problem)
         for _, _, label in self.runtime.subscriptions.sources:

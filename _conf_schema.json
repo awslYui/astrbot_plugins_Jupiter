@@ -1,15 +1,27 @@
 {
   "rooms": {
     "type": "list",
-    "description": "直播间与主播 UID",
-    "hint": "每项填 房间号:主播UID，例如 123456:987654321。",
+    "description": "监听直播间号",
+    "hint": "每项只填房间号，例如 22637261。所有房间共用关注 UID 列表。",
     "default": []
   },
   "extra_uids": {
     "type": "list",
-    "description": "额外关注的 B 站 UID",
-    "hint": "这些 UID 在所有已配置房间中的弹幕也会推送。",
+    "description": "关注用户的 B 站 UID",
+    "hint": "例如嘉然 672328094：转发她在任一已监听房间发出的弹幕。与房间主播无关。",
     "default": []
+  },
+  "room_names": {
+    "type": "list",
+    "description": "直播间通知名称（可选）",
+    "hint": "每项填 房间号:名称，例如 22637261:嘉然。留空时在首次通知前自动查询主播名。",
+    "default": []
+  },
+  "danmaku_prefix": {
+    "type": "string",
+    "description": "直播间通知前缀",
+    "hint": "支持 {主播名}、{房间号}，可以改为固定文字或留空；不附直播间链接。",
+    "default": "【{主播名}直播间】"
   },
   "target_umo": {
     "type": "string",
@@ -85,9 +97,15 @@
   },
   "interval_seconds": {
     "type": "int",
-    "description": "轮询间隔（秒）",
+    "description": "动态与 RSS 轮询间隔（秒）",
     "hint": "最低 60 秒。",
     "default": 120
+  },
+  "live_interval_seconds": {
+    "type": "int",
+    "description": "直播状态轮询间隔（秒）",
+    "hint": "每轮检查完成后等待。最低 5 秒，默认 30 秒；失败时自动延长。",
+    "default": 30
   },
   "notify_live_end": {
     "type": "bool",

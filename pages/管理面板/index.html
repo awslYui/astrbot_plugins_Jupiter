@@ -20,7 +20,7 @@
     <div class="status-strip" aria-live="polite">
       <span><i class="dot" id="running-dot"></i><strong id="running-label">正在连接管理面板</strong></span>
       <span id="binding-label">正在读取推送会话</span>
-      <span>待发送 <strong id="pending-count">—</strong></span>
+      <span>待发送 <strong id="pending-count">—</strong></span><span id="unsaved-state" hidden>有未保存更改</span>
     </div>
     <div id="message" class="message" role="status" hidden></div>
     <div id="runtime-warnings" class="message" role="status" hidden></div>
@@ -36,24 +36,25 @@
       <section id="sources" role="tabpanel" aria-labelledby="tab-sources">
         <div class="source-grid">
           <section class="panel">
-            <div class="panel-heading"><h2>直播间弹幕</h2><button type="button" class="outline" id="add-room">添加直播间</button></div>
+            <div class="panel-heading"><h2>监听直播间</h2><button type="button" class="outline" id="add-room">添加直播间</button></div>
+            <p class="hint section-intro">以下房间共用同一份关注 UID 列表。主播名用于通知展示，不决定关注谁。</p>
             <div class="room-table-wrap">
               <table class="room-table">
-                <thead><tr><th>房间号</th><th>主播 UID</th><th>状态</th><th>操作</th></tr></thead>
+                <thead><tr><th>房间号</th><th>通知名称（可选）</th><th>接收与推送</th><th>操作</th></tr></thead>
                 <tbody id="room-rows"></tbody>
               </table>
               <p id="rooms-empty" class="empty" hidden>尚未添加直播间</p>
             </div>
             <div class="extra-users">
-              <label for="extra_uids">额外关注 UID</label>
-              <div><input id="extra_uids" placeholder="多个 UID 用逗号分隔" autocomplete="off"><p class="hint">转发这些用户在已监听房间中的弹幕。</p></div>
+              <label for="extra_uids">关注用户 UID</label>
+              <div><textarea id="extra_uids" rows="2" placeholder="例如 672328094，多个 UID 用逗号或换行分隔"></textarea><p class="hint">例如填写嘉然的 UID 672328094，就会转发她在以上任一房间发出的弹幕。只能检测已添加的房间。</p></div>
             </div>
           </section>
 
           <section class="panel">
             <div class="panel-heading"><h2>动态与开播</h2></div>
             <div class="labelled-row"><label for="bili_uids">动态账号 UID</label><div><textarea id="bili_uids" rows="3" placeholder="每行一个 B 站 UID"></textarea><p class="hint">订阅账号发布的新动态。</p></div></div>
-            <div class="labelled-row"><label for="bili_rooms">开播提醒房间</label><div><textarea id="bili_rooms" rows="3" placeholder="每行一个直播间号"></textarea><p class="hint">定期检查开播状态。</p></div></div>
+            <div class="labelled-row"><label for="bili_rooms">开播提醒房间</label><div><textarea id="bili_rooms" rows="3" placeholder="每行一个直播间号"></textarea><p class="hint">独立轮询直播状态。在通知设置中开启下播提醒。</p></div></div>
             <div id="source-status" class="source-status" aria-live="polite"></div>
           </section>
         </div>
@@ -72,8 +73,14 @@
           <div class="input-action"><input id="target_umo" placeholder="平台 ID:GroupMessage:群号" autocomplete="off"><button type="button" id="test-send">测试已保存目标</button></div>
           <p class="hint">在目标 QQ 群发送 /sid 获取 UMO，或发送 /jupiter_bind 直接绑定。</p>
           <div class="divider"></div>
+          <label for="danmaku_prefix">直播间通知前缀</label>
+          <input id="danmaku_prefix" maxlength="200" placeholder="【{主播名}直播间】" autocomplete="off">
+          <p class="hint">支持 {主播名}、{房间号}，也可填固定文字或留空。主播名优先采用房间的通知名称，未填写时自动获取。通知不附直播间链接。</p>
+          <div class="notification-preview"><span>弹幕预览 · 使用首个监听房间</span><output id="notification-preview"></output></div>
+          <div class="divider"></div>
           <div class="field-grid">
-            <div><label for="interval_seconds">轮询间隔（秒）</label><input id="interval_seconds" type="number" min="60" step="1"><p class="hint">每轮订阅检查完成后等待，至少 60 秒。</p></div>
+            <div><label for="live_interval_seconds">直播状态轮询间隔（秒）</label><input id="live_interval_seconds" type="number" min="5" step="1"><p class="hint">默认 30 秒，最低 5 秒，每轮完成后等待。请求耗时和房间数量会增加实际延迟；失败时自动延长等待。</p></div>
+            <div><label for="interval_seconds">动态与 RSS 轮询间隔（秒）</label><input id="interval_seconds" type="number" min="60" step="1"><p class="hint">独立检查，每轮完成后等待，至少 60 秒。</p></div>
             <div><label for="gift_min_yuan">礼物最低金额（元）</label><input id="gift_min_yuan" type="number" min="0" step="0.01"><p class="hint">填 0 关闭付费礼物提醒。</p></div>
           </div>
           <div class="toggle-row"><div><label for="notify_stream">实时开播与下播提醒</label><p class="hint">使用弹幕事件源中的直播状态变化。</p></div><input id="notify_stream" type="checkbox" role="switch"></div>

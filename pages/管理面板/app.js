@@ -4,8 +4,8 @@
   const $ = (id) => document.getElementById(id);
   const secretFields = ['bridge_token', 'bili_sessdata', 'bili_buvid3'];
   const listFields = ['extra_uids', 'bili_uids', 'bili_rooms'];
-  const textFields = ['target_umo', 'bridge_url', 'bili_dedeuserid'];
-  const numberFields = ['interval_seconds', 'gift_min_yuan'];
+  const textFields = ['target_umo', 'bridge_url', 'bili_dedeuserid', 'danmaku_prefix'];
+  const numberFields = ['interval_seconds', 'live_interval_seconds', 'gift_min_yuan'];
   const switchFields = ['notify_stream', 'notify_live_end', 'notify_superchat'];
   let bridge;
   let state;
@@ -36,7 +36,9 @@
 
   function markDirty() {
     dirty = true;
+    $('unsaved-state').hidden = false;
     $('save-hint').textContent = '有未保存的更改。';
+    renderPreview();
   }
 
   function selectTab(button) {
@@ -74,19 +76,19 @@
     $('feeds-empty').hidden = $('feed-rows').children.length > 0;
   }
 
-  function addRoom(room = '', uid = '') {
+  function addRoom(room = '', name = '') {
     const row = document.createElement('tr');
     rowCounter += 1;
-    for (const [field, label, value] of [['room', '房间号', room], ['uid', '主播 UID', uid]]) {
+    for (const [field, label, value] of [['room', '房间号', room], ['name', '通知名称（可选）', name]]) {
       const cell = document.createElement('td');
       cell.dataset.label = label;
       const input = document.createElement('input');
       input.dataset[field] = '';
       input.value = value;
-      input.inputMode = 'numeric';
+      input.inputMode = field === 'room' ? 'numeric' : 'text';
       input.autocomplete = 'off';
-      input.maxLength = 20;
-      input.placeholder = label;
+      input.maxLength = field === 'room' ? 20 : 80;
+      input.placeholder = field === 'name' ? '留空自动获取主播名' : label;
       input.setAttribute('aria-label', `${label} ${rowCounter}`);
       cell.append(input);
       row.append(cell);
@@ -100,6 +102,14 @@
     $('room-rows').append(row);
     updateEmptyStates();
     return row;
+  }
+
+  function renderPreview() {
+    const row = $('room-rows').firstElementChild;
+    const room = row?.querySelector('[data-room]').value.trim() || '22637261';
+    const name = row?.querySelector('[data-name]').value.trim() || state?.rooms.find((entry) => entry.room_id === room)?.name || '主播名';
+    const prefix = $('danmaku_prefix').value.replaceAll('{主播名}', name).replaceAll('{房间号}', room);
+    $('notification-preview').textContent = `${prefix}和纯子：测试`;
   }
 
   function addFeed(url = '') {
@@ -147,13 +157,21 @@
       const room = row.querySelector('[data-room]').value.trim();
       const source = snapshot.rooms.find((entry) => entry.room_id === room);
       const cell = row.querySelector('.room-status');
-      cell.textContent = source ? `${source.status} · ${source.messages} 条` : '待应用';
+      cell.replaceChildren();
+      const connection = document.createElement('span');
+      connection.textContent = source?.status || '待应用';
+      const counts = document.createElement('small');
+      counts.textContent = source ? `收到 ${source.messages} · 匹配 ${source.matched} · 已发通知 ${source.sent}` : '保存后开始监听';
+      cell.append(connection, counts);
+      const name = row.querySelector('[data-name]');
+      name.placeholder = source?.name || '留空自动获取主播名';
       cell.className = `room-status ${source?.status === '已连接' ? 'good' : 'warn'}`;
     });
     $('conflict').hidden = !loadedRevision || snapshot.revision === loadedRevision;
     $('runtime-warnings').textContent = snapshot.warnings.join('\n');
     $('runtime-warnings').hidden = !snapshot.warnings.length;
     if (!busy) $('test-send').disabled = !snapshot.settings.target_umo;
+    renderPreview();
   }
 
   function loadForm(snapshot) {
@@ -161,7 +179,8 @@
     loadedRevision = snapshot.revision;
     const settings = snapshot.settings;
     $('room-rows').replaceChildren();
-    settings.rooms.forEach((entry) => { const [room, uid] = entry.split(':'); addRoom(room, uid); });
+    const names = new Map(settings.room_names.map((entry) => { const at = entry.indexOf(':'); return [entry.slice(0, at), entry.slice(at + 1)]; }));
+    settings.rooms.forEach((entry) => { const room = entry.split(':')[0]; addRoom(room, names.get(room) || ''); });
     $('feed-rows').replaceChildren();
     settings.feed_urls.forEach((url) => addFeed(url));
     listFields.forEach((field) => { $(field).value = settings[field].join(field === 'extra_uids' ? ', ' : '\n'); });
@@ -174,6 +193,7 @@
       document.querySelector(`[data-clear-secret="${field}"]`).textContent = '清除已保存值';
     });
     dirty = false;
+    $('unsaved-state').hidden = true;
     $('save-hint').textContent = '保存后重新连接事件源并应用订阅。';
     updateEmptyStates();
     renderStatus(snapshot);
@@ -193,18 +213,20 @@
 
   function collectSettings() {
     const settings = {};
+    settings.room_names = [];
     settings.rooms = Array.from(document.querySelectorAll('#room-rows tr')).flatMap((row) => {
       const room = row.querySelector('[data-room]').value.trim();
-      const uid = row.querySelector('[data-uid]').value.trim();
-      if (!room && !uid) return [];
-      if (!room || !uid) throw new Error('请同时填写直播间房间号和主播 UID');
-      return [`${room}:${uid}`];
+      const name = row.querySelector('[data-name]').value.trim();
+      if (!room && !name) return [];
+      if (!room) throw new Error('请填写直播间房间号');
+      if (name) settings.room_names.push(`${room}:${name}`);
+      return [room];
     });
     settings.feed_urls = Array.from(document.querySelectorAll('#feed-rows input')).map((input) => input.value.trim()).filter(Boolean);
     listFields.forEach((field) => { settings[field] = $(field).value.split(/[\s,，]+/).filter(Boolean); });
     textFields.forEach((field) => { settings[field] = $(field).value.trim(); });
     numberFields.forEach((field) => {
-      if (!$(field).value.trim()) throw new Error('请填写轮询间隔和礼物最低金额');
+      if (!$(field).value.trim()) throw new Error('请填写两项轮询间隔和礼物最低金额');
       settings[field] = Number($(field).value);
     });
     switchFields.forEach((field) => { settings[field] = $(field).checked; });
